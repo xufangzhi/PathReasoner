@@ -12,7 +12,7 @@ import gensim
 import tqdm
 from filelock import FileLock
 from transformers import PreTrainedTokenizer, is_tf_available, is_torch_available
-
+import glob
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +44,15 @@ class InputFeatures:
     input_ids: List[List[int]]
     attention_mask: Optional[List[List[int]]]
     token_type_ids: Optional[List[List[int]]]
-    # passage_mask: Optional[List[int]]
-    # option_mask: Optional[List[int]]
-    # question_mask: Optional[List[int]]
-    # space_bpe_ids: Optional[List[List[int]]]
-    # split_bpe_ids: Optional[List[List[int]]]
-    # variable_tags: Optional[List[List[int]]]
-    # predicate_tags: Optional[List[int]]
-    # negation_tags: Optional[List[List[int]]]
-    # inverse_tags: Optional[List[int]]
+    passage_mask: Optional[List[int]]
+    option_mask: Optional[List[int]]
+    question_mask: Optional[List[int]]
+    space_bpe_ids: Optional[List[List[int]]]
+    split_bpe_ids: Optional[List[List[int]]]
+    variable_tags: Optional[List[List[int]]]
+    predicate_tags: Optional[List[int]]
+    negation_tags: Optional[List[List[int]]]
+    inverse_tags: Optional[List[int]]
     label: Optional[int]
 
 
@@ -182,7 +182,8 @@ class ReclorProcessor(DataProcessor):
     def get_train_examples(self, data_dir):
         """See base class."""
         logger.info("LOOKING AT {} train".format(data_dir))
-        return self._create_examples(self._read_json(os.path.join(data_dir, "filter_data.json")), "train")
+        return self._create_examples(self._read_json(os.path.join(data_dir, "train_v3.json")), "train")
+        # return self._create_examples(self._read_json(os.path.join(data_dir, "train_qtype.json")), "train")
 
     def get_train_demos(self, data_dir):
         """See base class."""
@@ -192,7 +193,7 @@ class ReclorProcessor(DataProcessor):
     def get_dev_examples(self, data_dir):
         """See base class."""
         logger.info("LOOKING AT {} dev".format(data_dir))
-        return self._create_examples(self._read_json(os.path.join(data_dir, "extra_data.json")), "dev")
+        return self._create_examples(self._read_json(os.path.join(data_dir, "val_qtype.json")), "dev")
 
     def get_dev_demos(self, data_dir):
         """See base class."""
@@ -240,6 +241,60 @@ class ReclorProcessor(DataProcessor):
         return examples
 
 
+class DreamProcessor(DataProcessor):
+    """Processor for the ReClor data set."""
+
+    def get_train_examples(self, data_dir):
+        """See base class."""
+        logger.info("LOOKING AT {} train".format(data_dir))
+        return self._create_examples(self._read_json(os.path.join(data_dir, "train.json")), "train")
+
+    def get_dev_examples(self, data_dir):
+        """See base class."""
+        logger.info("LOOKING AT {} dev".format(data_dir))
+        return self._create_examples(self._read_json(os.path.join(data_dir, "dev.json")), "dev")
+
+    def get_test_examples(self, data_dir):
+        logger.info("LOOKING AT {} test".format(data_dir))
+        return self._create_examples(self._read_json(os.path.join(data_dir, "test.json")), "test")
+
+    def get_labels(self):
+        """See base class."""
+        return [0, 1, 2, 3]
+
+    def _read_json(self, input_file):
+        with open(input_file, "r") as f:
+            lines = json.load(f)
+        return lines
+
+    def _read_jsonl(self, input_file):
+        reader = jsonlines.Reader(open(input_file, "r"))
+        lines = [each for each in reader]
+        return lines
+
+    def _create_examples(self, lines, type):
+        """Creates examples for the training and dev sets."""
+        examples = []
+        for d in lines:
+            context = " ".join(d[0])
+            question = d[1][0]['question']
+            answers = d[1][0]['choice']
+            label = answers.index(d[1][0]['answer'])
+            # qtype = d['qtype']
+            if len(answers)==3:
+                examples.append(
+                    InputExample(
+                        example_id = "",
+                        question = question,
+                        contexts=[context, context, context],  # this is not efficient but convenient
+                        endings=[answers[0], answers[1], answers[2]],
+                        label = label,
+                        # qtype = [qtype, qtype, qtype, qtype]
+                        )
+                    )
+        return examples
+
+
 class LogiQAProcessor(DataProcessor):
     """ Processor for the LogiQA data set. """
 
@@ -249,7 +304,8 @@ class LogiQAProcessor(DataProcessor):
 
     def get_train_examples(self, data_dir):
         logger.info("LOOKING AT {} train".format(data_dir))
-        return self._create_examples(self._read_txt(os.path.join(data_dir, "Train_v1.txt")), "train")
+        return self._create_examples(self._read_txt(os.path.join(data_dir, "filtered_data_0.9_v2.txt")), "train")
+        # return self._create_examples(self._read_txt(os.path.join(data_dir, "Train_v1.txt")), "train")
 
     def get_dev_examples(self, data_dir):
         logger.info("LOOKING AT {} dev".format(data_dir))
@@ -298,6 +354,162 @@ class LogiQAProcessor(DataProcessor):
         assert len(examples) == n_examples
         return examples
 
+class RaceProcessor(DataProcessor):
+    """Processor for the RACE data set."""
+
+    def get_train_examples(self, data_dir):
+        """See base class."""
+        logger.info("LOOKING AT {} train".format(data_dir))
+        high = os.path.join(data_dir, "train/high")
+        middle = os.path.join(data_dir, "train/middle")
+        high = self._read_txt(high)
+        middle = self._read_txt(middle)
+        return self._create_examples(high + middle, "train")
+
+    def get_dev_examples(self, data_dir):
+        """See base class."""
+        logger.info("LOOKING AT {} dev".format(data_dir))
+        high = os.path.join(data_dir, "dev/high")
+        middle = os.path.join(data_dir, "dev/middle")
+        high = self._read_txt(high)
+        middle = self._read_txt(middle)
+        return self._create_examples(high + middle, "dev")
+
+    def get_test_examples(self, data_dir):
+        """See base class."""
+        logger.info("LOOKING AT {} test".format(data_dir))
+        high = os.path.join(data_dir, "test/high")
+        middle = os.path.join(data_dir, "test/middle")
+        high = self._read_txt(high)
+        middle = self._read_txt(middle)
+        return self._create_examples(high + middle, "test")
+
+    def get_labels(self):
+        """See base class."""
+        return ["0", "1", "2", "3"]
+
+    def _read_txt(self, input_dir):
+        lines = []
+        files = glob.glob(input_dir + "/*txt")
+        for file in tqdm.tqdm(files, desc="read files"):
+            with open(file, "r", encoding="utf-8") as fin:
+                data_raw = json.load(fin)
+                data_raw["race_id"] = file
+                lines.append(data_raw)
+        return lines
+
+    def _create_examples(self, lines, set_type):
+        """Creates examples for the training and dev sets."""
+        examples = []
+        for (_, data_raw) in enumerate(lines):
+            race_id = "%s-%s" % (set_type, data_raw["race_id"])
+            article = data_raw["article"]
+            for i in range(len(data_raw["answers"])):
+                truth = str(ord(data_raw["answers"][i]) - ord("A"))
+                question = data_raw["questions"][i]
+                options = data_raw["options"][i]
+
+                examples.append(
+                    InputExample(
+                        example_id=race_id,
+                        question=question,
+                        contexts=[article, article, article, article],  # this is not efficient but convenient
+                        endings=[options[0], options[1], options[2], options[3]],
+                        label=truth,
+                    )
+                )
+        return examples
+
+class ArcProcessor(DataProcessor):
+    """Processor for the ARC data set (request from allennlp)."""
+
+    def get_train_examples(self, data_dir):
+        """See base class."""
+        logger.info("LOOKING AT {} train".format(data_dir))
+        return self._create_examples(self._read_json(os.path.join(data_dir, "ARC-Challenge-Train.jsonl")), "train")
+
+    def get_dev_examples(self, data_dir):
+        """See base class."""
+        logger.info("LOOKING AT {} dev".format(data_dir))
+        return self._create_examples(self._read_json(os.path.join(data_dir, "ARC-Challenge-Dev.jsonl")), "dev")
+
+    def get_test_examples(self, data_dir):
+        logger.info("LOOKING AT {} test".format(data_dir))
+        return self._create_examples(self._read_json(os.path.join(data_dir, "ARC-Challenge-Test.jsonl")), "test")
+
+    def get_labels(self):
+        """See base class."""
+        return ["0", "1", "2", "3"]
+
+    def _read_json(self, input_file):
+        with open(input_file, "r", encoding="utf-8") as fin:
+            lines = fin.readlines()
+            return lines
+
+    def _create_examples(self, lines, type):
+        """Creates examples for the training and dev sets."""
+
+        # There are two types of labels. They should be normalized
+        def normalize(truth):
+            if truth in "ABCD":
+                return ord(truth) - ord("A")
+            elif truth in "1234":
+                return int(truth) - 1
+            else:
+                logger.info("truth ERROR! %s", str(truth))
+                return None
+
+        examples = []
+        three_choice = 0
+        four_choice = 0
+        five_choice = 0
+        other_choices = 0
+        # we deleted example which has more than or less than four choices
+        for line in tqdm.tqdm(lines, desc="read arc data"):
+            data_raw = json.loads(line.strip("\n"))
+            if len(data_raw["question"]["choices"]) == 3:
+                three_choice += 1
+                continue
+            elif len(data_raw["question"]["choices"]) == 5:
+                five_choice += 1
+                continue
+            elif len(data_raw["question"]["choices"]) != 4:
+                other_choices += 1
+                continue
+            four_choice += 1
+            truth = str(normalize(data_raw["answerKey"]))
+            assert truth != "None"
+            question_choices = data_raw["question"]
+            question = question_choices["stem"]
+            id = data_raw["id"]
+            options = question_choices["choices"]
+            if len(options) == 4:
+                examples.append(
+                    InputExample(
+                        example_id=id,
+                        question=question,
+                        contexts=[
+                            options[0]["para"].replace("_", ""),
+                            options[1]["para"].replace("_", ""),
+                            options[2]["para"].replace("_", ""),
+                            options[3]["para"].replace("_", ""),
+                        ],
+                        endings=[options[0]["text"], options[1]["text"], options[2]["text"], options[3]["text"]],
+                        label=truth,
+                    )
+                )
+
+        if type == "train":
+            assert len(examples) > 1
+            assert examples[0].label is not None
+        logger.info("len examples: %s}", str(len(examples)))
+        logger.info("Three choices: %s", str(three_choice))
+        logger.info("Five choices: %s", str(five_choice))
+        logger.info("Other choices: %s", str(other_choices))
+        logger.info("four choices: %s", str(four_choice))
+
+        return examples
+
 
 def manual_prompt(raw_question):
     trigger = ['which one of the following', 'Which one of the following', 'Which of the following', 
@@ -317,6 +529,24 @@ def manual_prompt(raw_question):
             return raw_question.replace(t, "_")
     return raw_question
 
+def normalize_text(text):
+    if text[0] == ".":
+        text = text[1:]
+    text = text.replace(". . .", ".")
+    text = text.replace(". .", ".")
+    text = text.replace(". \"", "\"")
+    text = text.replace(".\"", "\"")
+    text = text.replace("! \"", "\"")
+    text = text.replace("!\"", "\"")
+    text = text.replace(".).", ").")
+    text = text.replace(". ).", ").")
+    text = text.replace(".!!",".")
+    text = text.replace(". !!", ".")
+    text = text.replace("!\".","\".")
+    text = text.replace("! \".","\".")
+    text = text.replace("...",".")
+    text = text.replace("..",".")
+    return text
 
 def convert_examples_to_arg_features(
     examples: List[InputExample],
@@ -346,14 +576,16 @@ def convert_examples_to_arg_features(
             logger.info("Writing example %d of %d" % (ex_index, len(examples)))
         choices_inputs = []
         for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
-            text_a = context
+            text_a = normalize_text(context)
             # text_b = manual_prompt(example.question)   # question containing _
-            text_b = example.question
-            text_c = ending
+            text_b = normalize_text(example.question)
+            text_c = normalize_text(ending)
 
             stopwords = list(gensim.parsing.preprocessing.STOPWORDS) + punctuations
-            inputs = arg_tokenizer(text_a, text_b, text_c, tokenizer, stopwords, relations, punctuations, max_ngram, max_length)
+            inputs, no_contain = arg_tokenizer(text_a, text_b, text_c, tokenizer, stopwords, relations, punctuations, max_ngram, max_length)
             choices_inputs.append(inputs)
+            if no_contain==1:
+                break
 
         label = label_map[example.label]
         input_ids = [x['input_ids'] for x in choices_inputs]
@@ -376,25 +608,25 @@ def convert_examples_to_arg_features(
         #         arg_bpe_pattern_ids.append(choice_pattern)
         #         arg_bpe_type_ids.append(choice_type)
         #     argument_bpe_ids = (arg_bpe_pattern_ids, arg_bpe_type_ids)
-
-        features.append(
-            InputFeatures(
-                example_id=example.example_id,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_type_ids=None,
-                # passage_mask=a_mask,
-                # option_mask=b_mask,
-                # question_mask=c_mask,
-                # space_bpe_ids=space_bpe_ids,
-                # split_bpe_ids=split_bpe_ids,
-                # variable_tags=variable_tags,
-                # predicate_tags=predicate_tags,
-                # negation_tags=negation_tags, 
-                # inverse_tags=inverse_tags, 
-                label=label,
+        if no_contain!=1:
+            features.append(
+                InputFeatures(
+                    example_id=example.example_id,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=None,
+                    passage_mask=a_mask,
+                    option_mask=b_mask,
+                    question_mask=c_mask,
+                    space_bpe_ids=space_bpe_ids,
+                    split_bpe_ids=split_bpe_ids,
+                    variable_tags=variable_tags,
+                    predicate_tags=predicate_tags,
+                    negation_tags=negation_tags, 
+                    inverse_tags=inverse_tags, 
+                    label=label,
+                )
             )
-        )
 
     for f in features[:2]:
         logger.info("*** Example ***")
@@ -405,6 +637,6 @@ def convert_examples_to_arg_features(
 
 
 
-processors = {"reclor": ReclorProcessor, "logiqa": LogiQAProcessor}
+processors = {"reclor": ReclorProcessor, "logiqa": LogiQAProcessor, "race":RaceProcessor, "arc":ArcProcessor, "dream":DreamProcessor}
 MULTIPLE_CHOICE_TASKS_NUM_LABELS = {"reclor", 4, "logiqa", 4}
 

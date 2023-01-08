@@ -24,6 +24,7 @@ from collections import Counter
 
 
 from logida import Ours, RoBERTa_single
+from pathreasoner import PathReasoner
 from tokenization import arg_tokenizer, logic_tokenizer
 from utils_multiple_choice import Split, MyMultipleChoiceDataset
 from graph_building_blocks.argument_set_punctuation_v4 import punctuations
@@ -183,9 +184,9 @@ def main():
         else:
             max_rel_id = 0
     else: raise Exception
-    # model = RoBERTa_single.from_pretrained("/data/pyd/xufangzhi/LogiDA/checkpoints/reclor/logida_origin/")
-    # model = Ours.from_pretrained(model_args.model_name_or_path)
-    model = RobertaForMultipleChoice.from_pretrained("/data/pyd/xufangzhi/LogiDA/checkpoints/reclor/logida_origin/")
+    # model = RoBERTa_single.from_pretrained(model_args.model_name_or_path)
+    model = PathReasoner.from_pretrained(model_args.model_name_or_path)
+    # model = RobertaForMultipleChoice.from_pretrained("/data/pyd/xufangzhi/PathReasoner/checkpoints/logiqa/logida_single/")
     # model = LogiDA.from_pretrained(
     #     model_args.model_name_or_path,
     #     from_tf=bool(".ckpt" in model_args.model_name_or_path),

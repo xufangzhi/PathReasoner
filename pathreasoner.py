@@ -62,17 +62,17 @@ class MultiHeadAttention(nn.Module):
 
         self.attn_bias_linear = nn.Linear(1, self.num_heads)
 
-    def forward(self, q, k, v, attn_bias=None, attention_mask=None, atom_graph=None, variable_graph=None):
-        orig_q_size = q.size()
+    def forward(self, x, attention_mask=None, atom_graph=None, variable_graph=None):
+        orig_q_size = x.size()
 
         d_k = self.att_size
         d_v = self.att_size
-        batch_size = q.size(0)
+        batch_size = x.size(0)
 
         # head_i = Attention(Q(W^Q)_i, K(W^K)_i, V(W^V)_i)
-        q = self.linear_q(q).view(batch_size, -1, self.num_heads, d_k)
-        k = self.linear_k(k).view(batch_size, -1, self.num_heads, d_k)
-        v = self.linear_v(v).view(batch_size, -1, self.num_heads, d_v)
+        q = self.linear_q(x).view(batch_size, -1, self.num_heads, d_k)
+        k = self.linear_k(x).view(batch_size, -1, self.num_heads, d_k)
+        v = self.linear_v(x).view(batch_size, -1, self.num_heads, d_v)
 
         q = q.transpose(1, 2)  # [b, h, q_len, d_k]
         v = v.transpose(1, 2)  # [b, h, v_len, d_v]
@@ -82,25 +82,6 @@ class MultiHeadAttention(nn.Module):
         # Attention(Q, K, V) = softmax((QK^T)/sqrt(d_k))V
         q = q * self.scale
         x = torch.matmul(q, k)  # [b, h, q_len, k_len]
-        if attn_bias is not None:
-            attn_bias = attn_bias.unsqueeze(-1).permute(0, 3, 1, 2)
-            attn_bias = attn_bias.repeat(1, self.num_heads, 1, 1)
-            x += attn_bias
-
-        '''
-        if atom_graph is not None:
-            # atom_graph_2order = torch.matmul(atom_graph, atom_graph)
-            atom_graph = atom_graph.unsqueeze(-1).permute(0, 3, 1, 2)
-            atom_graph = atom_graph.repeat(1, self.num_heads, 1, 1)
-            x += atom_graph
-
-        if variable_graph is not None:
-            # variable_graph_2order = torch.matmul(variable_graph, variable_graph)
-            # variable_graph = torch.matmul(variable_graph, variable_graph)
-            variable_graph = variable_graph.unsqueeze(-1).permute(0, 3, 1, 2)
-            variable_graph = variable_graph.repeat(1, self.num_heads, 1, 1)
-            x += variable_graph
-        '''
 
         if attention_mask is not None:
             attention_mask = attention_mask.unsqueeze(-1).permute(0, 3, 1, 2)
@@ -119,61 +100,113 @@ class MultiHeadAttention(nn.Module):
         assert x.size() == orig_q_size
         return x
 
-''' 
+
 class PathAttention(nn.Module):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, num_heads):
         super(PathAttention, self).__init__()
-        self.num_heads = 4
+        self.num_heads = num_heads
         self.hidden_size = hidden_size
         self.att_size = self.hidden_size // self.num_heads
         self.scale = self.att_size ** -0.5
         self.att_dropout = nn.Dropout(0.1)
-        self.query_linear = nn.Linear(self.hidden_size, self.num_heads*self.att_size)
-        self.key_linear = nn.Linear(self.hidden_size, self.num_heads*self.att_size)
-        self.value_linear = nn.Linear(self.hidden_size, self.num_heads*self.att_size)
-        self.output_layer = nn.Linear(self.num_heads*self.att_size, self.hidden_size)
-        # self.rnn = nn.RNN(self.hidden_size, self.hidden_size, 1)
+        self.proj_var = nn.Linear(self.hidden_size, self.hidden_size)
+        self.proj_sym = nn.Linear(self.hidden_size, self.hidden_size)
+        self.proj_score = nn.Linear(2*self.hidden_size, 1)
+        self.leaky_relu = nn.LeakyReLU(0.02)   # leaky rate
+        self.tanh = nn.Tanh()
 
-    def forward(self, x, predicate_pos, variable_tags, atom_graph, variable_graph, attention_mask):
+        self.proj_cross_atom_score = nn.Linear(self.hidden_size, 1)
+        self.proj_atom = nn.Linear(2*self.hidden_size, self.hidden_size)
+        self.query_linear = nn.Linear(self.hidden_size, self.num_heads * self.att_size)
+        self.key_linear = nn.Linear(self.hidden_size, self.num_heads * self.att_size)
+        self.value_linear = nn.Linear(self.hidden_size, self.num_heads * self.att_size)
+        self.output_layer = nn.Linear(self.num_heads*self.att_size, self.hidden_size)
+
+    def forward(self, x, predicate_pos, variable_tags, atom_graph, variable_graph, attention_mask, occurrence_list):
         device = x.device
         batch_size = x.size(0)
         node_size = x.size(1)
-        query = self.query_linear(x).view(batch_size, -1, self.num_heads, self.att_size).transpose(1,2)
-        key = self.key_linear(x).view(batch_size, -1, self.num_heads, self.att_size).transpose(1,2).transpose(2,3)
-        value = self.value_linear(x).view(batch_size, -1, self.num_heads, self.att_size).transpose(1,2)
+        embed_size = x.size(2)
 
-        # key = key.transpose(1,2)
-        query = query * self.scale
+        """ in atom aggregatation """
+        # masked attention
+        query = self.query_linear(x).view(batch_size, -1, self.num_heads, self.att_size)
+        key = self.key_linear(x).view(batch_size, -1, self.num_heads, self.att_size)
+        value = self.value_linear(x).view(batch_size, -1, self.num_heads, self.att_size)
+
+        query = query.transpose(1,2) * self.scale
+        key = key.transpose(1,2).transpose(2,3)
+        value = value.transpose(1,2)
         att = torch.matmul(query, key)
 
-        if atom_graph is not None:
-            atom_graph_0 = torch.zeros((batch_size,1,node_size,node_size)).to(device)
-            atom_graph_1 = atom_graph.unsqueeze(-1).permute(0,3,1,2)
-            atom_graph_2 = torch.matmul(atom_graph_1, atom_graph_1)   # two order
-            atom_graph_3 = torch.matmul(atom_graph_1, atom_graph_2)   # two order
-            mh_atom_graph = torch.cat([atom_graph_0, atom_graph_1, atom_graph_2, atom_graph_3], dim=1)
-            att += mh_atom_graph
-        if variable_graph is not None:
-            variable_graph_0 = torch.zeros((batch_size,1,node_size,node_size)).to(device)
-            variable_graph_1 = variable_graph.unsqueeze(-1).permute(0,3,1,2)
-            variable_graph_2 = torch.matmul(variable_graph_1, variable_graph_1)
-            variable_graph_3 = torch.matmul(variable_graph_1, variable_graph_2)   # two order
-            mh_variable_graph = torch.cat([variable_graph_0, variable_graph_1, variable_graph_2, variable_graph_3], dim=1)
-            att += mh_variable_graph
+        
+        # get atom_graph_score
+        for b, (item_encoded_variables, item_predicate_pos) in enumerate(zip(x, predicate_pos)):
+            for i, pos in enumerate(item_predicate_pos):
+                if pos==1:
+                    # aggregate each atom with both predicate and variables
+                    if i == 0:   # at the begining single variable atom
+                        var_feat = self.proj_var(item_encoded_variables[1,:])
+                        sym_feat = self.proj_sym(item_encoded_variables[0,:])
+                        score = self.leaky_relu(self.proj_score(self.tanh(torch.cat([var_feat,sym_feat], dim=-1))))
+                        atom_graph[b,1,0], atom_graph[b,0,1] = score, score
+                    elif i == 1:   # at the begining two variable atom
+                        var_feat = self.proj_var((item_encoded_variables[0,:]+item_encoded_variables[2,:])/2)
+                        sym_feat = self.proj_sym(item_encoded_variables[1,:])
+                        score = self.leaky_relu(self.proj_score(self.tanh(torch.cat([var_feat,sym_feat], dim=-1))))
+                        atom_graph[b,1,0], atom_graph[b,0,1], atom_graph[b,1,2], atom_graph[b,2,1] = score, score, score, score
+                    elif item_predicate_pos[i-2] == 1:   # fact atom
+                        var_feat = self.proj_var(item_encoded_variables[i+1,:])
+                        sym_feat = self.proj_sym(item_encoded_variables[i,:])
+                        score = self.leaky_relu(self.proj_score(self.tanh(torch.cat([var_feat,sym_feat], dim=-1))))
+                        atom_graph[b,i,i-1], atom_graph[b,i-1,i] = score, score
+                    else:   # two variable atom
+                        var_feat = self.proj_var((item_encoded_variables[i-1,:]+item_encoded_variables[i+1,:])/2)
+                        sym_feat = self.proj_sym(item_encoded_variables[i,:])
+                        score = self.leaky_relu(self.proj_score(self.tanh(torch.cat([var_feat,sym_feat], dim=-1))))
+                        atom_graph[b,i,i-1], atom_graph[b,i,i+1], atom_graph[b,i-1,i], atom_graph[b,i+1,i] = score, score, score, score
 
+        # get cross atom score
+        for b, (item_encoded_variables, occ_list) in enumerate(zip(x, occurrence_list)):
+            for occ in occ_list:
+                score = self.proj_cross_atom_score((item_encoded_variables[occ[0],:]+item_encoded_variables[occ[1],:])/2)
+                score = self.leaky_relu(score)
+                variable_graph[b,occ[0],occ[1]] = score
+                variable_graph[b,occ[1],occ[0]] = score
+        
+        
+        # in atom bias
+        # atom_graph = torch.matmul(atom_graph, atom_graph).unsqueeze(-1).permute(0, 3, 1, 2)   # two order
+        atom_graph_2 = torch.matmul(atom_graph, atom_graph)
+
+        atom_graph = 0.2*atom_graph + 0.8*atom_graph_2
+        atom_graph = atom_graph.unsqueeze(-1).permute(0, 3, 1, 2)
+        atom_graph = atom_graph.repeat(1, self.num_heads, 1, 1)
+        att += atom_graph
+        
+        # cross atom bias
+        variable_graph = torch.matmul(variable_graph, variable_graph).unsqueeze(-1).permute(0, 3, 1, 2)
+        # variable_graph_2 = torch.matmul(variable_graph, variable_graph)
+        # variable_graph = 0.1*variable_graph + 0.9*variable_graph_2
+        # variable_graph = variable_graph.unsqueeze(-1).permute(0, 3, 1, 2)
+        variable_graph = variable_graph.repeat(1, self.num_heads, 1, 1)
+        att += variable_graph
+        
+        # attention mask
         # if attention_mask is not None:
+        #     attention_mask = attention_mask.unsqueeze(-1).permute(0, 3, 1, 2)
+        #     attention_mask = attention_mask.repeat(1, self.num_heads, 1, 1)
         #     att += attention_mask
 
         att = torch.softmax(att, dim=-1)
         att = self.att_dropout(att)
         x = att.matmul(value)
 
+        # recover size
         x = x.transpose(1, 2).contiguous()  # [b, q_len, h, attn]
-        x = x.view(batch_size, -1, self.num_heads * self.att_size)
-
+        x = x.view(batch_size, -1, self.num_heads*self.att_size)
         x = self.output_layer(x)
 
-
         path_embed = []
         for item_encoded_variables, item_predicate_pos in zip(x, predicate_pos):
             item_path_embed = []
@@ -181,107 +214,38 @@ class PathAttention(nn.Module):
                 if pos==1:
                     # aggregate each atom with both predicate and variables
                     if i == 0:   # at the begining single variable atom
-                        atom_embed = item_encoded_variables[0:2,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
+                        # atom_embed = item_encoded_variables[0:2,:].mean(dim=0)  # origin
+                        var_feat = item_encoded_variables[1,:]
+                        sym_feat = item_encoded_variables[0,:]
+                        atom_embed = self.proj_atom(torch.cat([var_feat, sym_feat], dim=-1))
+                        item_path_embed += [atom_embed,atom_embed]
                     elif i == 1:   # at the begining two variable atom
-                        atom_embed = item_encoded_variables[0:3,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
+                        # atom_embed = item_encoded_variables[0:3,:].mean(dim=0)  # origin
+                        var_feat = (item_encoded_variables[0,:] + item_encoded_variables[2,:]) / 2
+                        sym_feat = item_encoded_variables[1,:]
+                        atom_embed = self.proj_atom(torch.cat([var_feat, sym_feat], dim=-1))
+                        item_path_embed += [atom_embed,atom_embed,atom_embed]
                     elif item_predicate_pos[i-2] == 1:   # fact atom
-                        atom_embed = item_encoded_variables[i:i+2,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
+                        # atom_embed = item_encoded_variables[i:i+2,:].mean(dim=0)  # origin
+                        var_feat = item_encoded_variables[i+1,:]
+                        sym_feat = item_encoded_variables[i,:]
+                        atom_embed = self.proj_atom(torch.cat([var_feat, sym_feat], dim=-1))
+                        item_path_embed += [atom_embed,atom_embed]
                     else:   # two variable atom
-                        atom_embed = item_encoded_variables[i-1:i+2,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
+                        # atom_embed = item_encoded_variables[i-1:i+2,:].mean(dim=0)  # origin
+                        var_feat = (item_encoded_variables[i-1,:] + item_encoded_variables[i+1,:]) / 2
+                        sym_feat = item_encoded_variables[i,:]
+                        atom_embed = self.proj_atom(torch.cat([var_feat, sym_feat], dim=-1))
+                        item_path_embed += [atom_embed,atom_embed,atom_embed]
                 
             item_path_embed = torch.stack(item_path_embed, dim=0)
-
-            # item_path_embed, _ = self.rnn(item_path_embed.unsqueeze(1))  # [atom_num, 1, hidden_size]
-            # item_path_embed = item_path_embed.squeeze(1).mean(dim=0)
             item_path_embed = item_path_embed.mean(dim=0)
             item_path_embed = item_path_embed.unsqueeze(0).repeat(node_size,1)
             path_embed.append(item_path_embed)
-        path_embed = torch.stack(path_embed, dim=0)
-        return path_embed
-'''
 
-class PathAttention(nn.Module):
-    def __init__(self, hidden_size):
-        super(PathAttention, self).__init__()
-        self.hidden_size = hidden_size
-        self.att_size = self.hidden_size
-        self.scale = self.att_size ** -0.5
-        self.att_dropout = nn.Dropout(0.1)
-        self.query_linear = nn.Linear(self.hidden_size, self.hidden_size)
-        self.key_linear = nn.Linear(self.hidden_size, self.hidden_size)
-        self.value_linear = nn.Linear(self.hidden_size, self.hidden_size)
-        # self.path_output_layer = nn.Linear(self.hidden_size, self.hidden_size)
-        # self.rnn = nn.RNN(self.hidden_size, self.hidden_size, 1)
-
-    def forward(self, x, predicate_pos, variable_tags, atom_graph, variable_graph, attention_mask):
-        device = x.device
-        node_size = x.size(1)
-        query = self.query_linear(x)
-        key = self.key_linear(x)
-        value = self.value_linear(x)
-
-        key = key.transpose(1,2)
-        query = query * self.scale
-        att = torch.matmul(query, key)
-
-        """ softmax two order """
-        # if attention_mask is not None:
-        #     att += attention_mask
-        # att = torch.softmax(att, dim=-1)
-        # att = torch.matmul(att, att)  # two order
-
-        if atom_graph is not None:
-            # atom_graph_2order = torch.matmul(atom_graph, atom_graph)
-            atom_graph = torch.matmul(atom_graph, atom_graph)   # two order
-            att += atom_graph
-        if variable_graph is not None:
-            # variable_graph_2order = torch.matmul(variable_graph, variable_graph)
-            variable_graph = torch.matmul(variable_graph, variable_graph)
-            att += variable_graph
-
-        """ generate the attention mask """
-        # attention_mask = atom_graph+variable_graph
-        # attention_mask[attention_mask==0] = float('-inf')
-        # attention_mask[attention_mask>0] = 0
-        # att += attention_mask
-
-        # if attention_mask is not None:
-        #     att += attention_mask
-
-        att = torch.softmax(att, dim=-1)
-        att = self.att_dropout(att)
-        x = att.matmul(value)
-
-        path_embed = []
-        for item_encoded_variables, item_predicate_pos in zip(x, predicate_pos):
-            item_path_embed = []
-            for i, pos in enumerate(item_predicate_pos):
-                if pos==1:
-                    # aggregate each atom with both predicate and variables
-                    if i == 0:   # at the begining single variable atom
-                        atom_embed = item_encoded_variables[0:2,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
-                    elif i == 1:   # at the begining two variable atom
-                        atom_embed = item_encoded_variables[0:3,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
-                    elif item_predicate_pos[i-2] == 1:   # fact atom
-                        atom_embed = item_encoded_variables[i:i+2,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
-                    else:   # two variable atom
-                        atom_embed = item_encoded_variables[i-1:i+2,:].mean(dim=0)
-                        item_path_embed.append(atom_embed)
-                
-            item_path_embed = torch.stack(item_path_embed, dim=0)
-
-            # item_path_embed, _ = self.rnn(item_path_embed.unsqueeze(1))  # [atom_num, 1, hidden_size]
-            # item_path_embed = item_path_embed.squeeze(1).mean(dim=0)
-            item_path_embed = item_path_embed.mean(dim=0)
-            item_path_embed = item_path_embed.unsqueeze(0).repeat(node_size,1)
-            path_embed.append(item_path_embed)
+        # pad_embed = torch.zeros(embed_size, dtype=x.dtype, device=x.device)   #
+        # path_embed = [spans + [pad_embed] * (node_size - len(spans)) for spans in path_embed]   #
+        # path_embed = [torch.stack(spans,dim=0) for spans in path_embed]  #
         path_embed = torch.stack(path_embed, dim=0)
         return path_embed
 
@@ -289,44 +253,59 @@ class PathAttention(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self, hidden_size, ffn_size, dropout_rate, attention_dropout_rate, num_heads, attn_bias=None):
         super(EncoderLayer, self).__init__()
-
+        # self.num_heads = 1
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        # self.multihead_layer = nn.Linear(self.num_heads*hidden_size, hidden_size)
         self.self_attention_norm = nn.LayerNorm(hidden_size)
         self.self_attention = MultiHeadAttention(hidden_size, attention_dropout_rate, num_heads)
-        self.path_attention = PathAttention(hidden_size)
+        self.path_attention = PathAttention(hidden_size, num_heads)
 
         self.self_attention_dropout = nn.Dropout(dropout_rate)
 
         self.ffn_norm = nn.LayerNorm(hidden_size)
         self.ffn = FeedForwardNetwork(hidden_size, ffn_size, dropout_rate)
         self.ffn_dropout = nn.Dropout(dropout_rate)
-        # self.fusion = nn.Linear(3*hidden_size, hidden_size)
 
 
-    def forward(self, x, predicate_pos, variable_tags, attn_bias=None, attention_mask=None, atom_graph=None, variable_graph=None):
+    def forward(self, x, predicate_pos, variable_tags, attn_bias=None, attention_mask=None, atom_graph=None, variable_graph=None, occurrence_list=None):
+        # multihead path attention 
+        """
+        multiheads = []
+        for _ in range(self.num_heads):
+            y = self.self_attention_norm(x)  # pre norm
+            y_self = self.self_attention(y, attention_mask, atom_graph, variable_graph)   # self_attention module
+            y_path = self.path_attention(y, predicate_pos, variable_tags, atom_graph, variable_graph, attention_mask)  # path_attention module
+            y = (y_self + y_path) / 2
+            y = self.layer_norm(y)
+            multiheads.append(y)
+        y = self.multihead_layer(torch.cat(multiheads, dim=-1))
+        """
+
+        # single head path attention
         y = self.self_attention_norm(x)  # pre norm
-        y_self = self.self_attention(x, x, x, attn_bias, attention_mask, atom_graph, variable_graph)   # self_attention module
+        y_self = self.self_attention(y, attention_mask, atom_graph, variable_graph)   # self_attention module
+        y_path = self.path_attention(y, predicate_pos, variable_tags, atom_graph, variable_graph, attention_mask, occurrence_list)  # path_attention module
+        y = (y_self + y_path) / 2  # mean fusion
+        # y = y_self
+        # y = y_self + y_path
+        # y = self.layer_norm(y)
 
-        y_path = self.path_attention(y_self, predicate_pos, variable_tags, atom_graph, variable_graph, attention_mask)  # path_attention module
-        y = (y_self + y_path) / 2
-
-        # y = self.self_attention_norm(y)  # post norm
-        # y = self.fusion(torch.cat([y_self, y_path, y_self+y_path], dim=-1))
-
-
-        y = self.self_attention_dropout(y)  # origin
+        y = self.self_attention_dropout(y)  # add
+        # y = self.self_attention_norm(y)   # pre norm and add
         x = x + y
-        # x = y
 
-        # x = self.self_attention_dropout(x+y)   # add together
+        # y = self.self_attention_norm(x)  # post norm and add
 
-        y = self.ffn_norm(x)
+        y = self.ffn_norm(x)  # pre norm
         y = self.ffn(y)
 
-        # y = self.ffn(x)
         y = self.ffn_dropout(y)
+
+        # y = self.ffn_norm(y)   # pre norm and add
         x = x + y
 
-        # x = self.ffn_norm(x)  # post norm
+        # x = self.ffn_norm(x)   # post norm and add
+
         return x
 
 
@@ -348,14 +327,14 @@ class Position_Embedding(nn.Module):
 
 
 
-class Ours(BertPreTrainedModel):
+class PathReasoner(BertPreTrainedModel):
 
     def __init__(self, 
                 config,):
         super().__init__(config)
 
         ''' roberta model '''
-        self.layer_num = 6
+        self.layer_num = 3
         self.head_num = 4
         self.dropout = 0.1
         self.hidden_size = 1024
@@ -369,15 +348,12 @@ class Ours(BertPreTrainedModel):
         self.linear = nn.Linear(3*self.hidden_size,self.hidden_size)
         self.pos_embed = Position_Embedding(self.hidden_size)
         self.MeanPool = MeanPooling()
-        # self._opt_clslm = nn.Linear(self.hidden_size, 1)
-        # self._proj_sequence_h = nn.Linear(self.hidden_size, 1, bias=False)
-        # self.lm_linear = nn.Linear(3*self.hidden_size, self.hidden_size, bias=False)
-        # self._proj_lm_classifier = nn.Linear(self.hidden_size, 1)
 
         encoders = [EncoderLayer(self.hidden_size, self.hidden_size, self.dropout, self.dropout, self.head_num)
                     for _ in range(self.layer_num)]
         self.encoder_layers = nn.ModuleList(encoders)
 
+        # self.init_embed = nn.Embedding(4,1024)
 
     def get_variables(self, seq, seq_mask, space_bpe_ids, split_bpe_ids, passage_mask, option_mask, question_mask):
         '''
@@ -518,8 +494,14 @@ class Ours(BertPreTrainedModel):
 
             num = 0
             for var, pred, inv in zip(item_variable_tags, item_predicate_tags, item_inverse_tags):
+                # if pred<=3:
+                #     symbol_type = pred-1
+                # else:
+                #     symbol_type = 3
                 if pred==7:     # fact
-                    item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device))
+                    item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device)) # random
+                    # item_extend_encoded_variables.append(self.init_embed(torch.LongTensor([symbol_type]).to(device)).squeeze(0))   # type init
+                    # item_extend_encoded_variables.append(item_encoded_variables[num,:])
                     item_extend_span_masks.append(1)
                     item_extend_encoded_variables.append(item_encoded_variables[num,:])
                     item_extend_span_masks.append(1)
@@ -528,7 +510,9 @@ class Ours(BertPreTrainedModel):
                     num += 1
                 else:
                     if -1 in var:   # single variable
-                        item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device))
+                        item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device)) #random
+                        # item_extend_encoded_variables.append(self.init_embed(torch.LongTensor([symbol_type]).to(device)).squeeze(0))   # type init
+                        # item_extend_encoded_variables.append(item_encoded_variables[num,:])
                         item_extend_span_masks.append(1)
                         item_extend_encoded_variables.append(item_encoded_variables[num,:])
                         item_extend_span_masks.append(1)
@@ -539,7 +523,9 @@ class Ours(BertPreTrainedModel):
                         if inv==1:   # reverse
                             item_extend_encoded_variables.append(item_encoded_variables[num+1,:])
                             item_extend_span_masks.append(1)
-                            item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device))
+                            item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device))  # random
+                            # item_extend_encoded_variables.append(self.init_embed(torch.LongTensor([symbol_type]).to(device)).squeeze(0))   # type init
+                            # item_extend_encoded_variables.append((item_encoded_variables[num+1,:]+item_encoded_variables[num,:])/2)
                             item_extend_span_masks.append(1)
                             item_extend_encoded_variables.append(item_encoded_variables[num,:])
                             item_extend_span_masks.append(1)
@@ -549,7 +535,9 @@ class Ours(BertPreTrainedModel):
                         else:
                             item_extend_encoded_variables.append(item_encoded_variables[num,:])
                             item_extend_span_masks.append(1)
-                            item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device))
+                            item_extend_encoded_variables.append(nn.init.normal_(torch.zeros(1024), mean=0, std=0.1).to(device)) # random
+                            # item_extend_encoded_variables.append(self.init_embed(torch.LongTensor([symbol_type]).to(device)).squeeze(0))   # type init
+                            # item_extend_encoded_variables.append((item_encoded_variables[num,:]+item_encoded_variables[num+1,:])/2)
                             item_extend_span_masks.append(1)
                             item_extend_encoded_variables.append(item_encoded_variables[num+1,:])
                             item_extend_span_masks.append(1)
@@ -604,9 +592,8 @@ class Ours(BertPreTrainedModel):
     def get_path_graph(self, variable_tags, negation_tags, inverse_tags, predicate_pos, occurrence_list, node_num, device):
         batch_size = len(variable_tags)
         hidden_size = 1024
-        atom_graph = torch.zeros((batch_size, node_num, node_num), dtype=torch.float32)
-        variable_graph = torch.zeros((batch_size, node_num, node_num), dtype=torch.float32)
-        
+        atom_graph = torch.zeros((batch_size, node_num, node_num))
+        variable_graph = torch.zeros((batch_size, node_num, node_num))
 
         for b, item_predicate_pos in enumerate(predicate_pos):
             for i, pos in enumerate(item_predicate_pos):
@@ -627,6 +614,7 @@ class Ours(BertPreTrainedModel):
                         atom_graph[b,i+1,i] = 1
                         atom_graph[b,i,i-1] = 1
                         atom_graph[b,i,i+1] = 1
+
         for b, occ_list in enumerate(occurrence_list):
             for occ in occ_list:
                 variable_graph[b,occ[0],occ[1]] = 1
@@ -700,15 +688,18 @@ class Ours(BertPreTrainedModel):
 
 
         encoded_variables += self.pos_embed(encoded_variables)    # add position embedding
-        # encoded_variables = self.input_dropout(encoded_variables)   # input dropout
+        pathreasoner_layers = []
         for enc_layer in self.encoder_layers:
             attn_bias = None
-            encoded_variables = enc_layer(encoded_variables, predicate_pos, flat_variable_tags, attn_bias, attention_mask, atom_graph, variable_graph)
-
+            encoded_variables = enc_layer(encoded_variables, predicate_pos, flat_variable_tags, attn_bias, attention_mask, atom_graph, variable_graph, occurrence_list)
+            pathreasoner_layers.append(encoded_variables)
+        # encoded_variables = torch.stack(pathreasoner_layers, dim=0).mean(dim=0)
 
         path_embed = self.aggregate_reason_path(encoded_variables, predicate_pos)  #[batch_size, hidden_size]
+        # path_embed = path_embed.mean(dim=1)
 
         # node_embed = encoded_variables.mean(dim=1)
+        encoded_variables = pathreasoner_layers[-1] + pathreasoner_layers[-2]   # last two mean for node embed
         node_embed = self.MeanPool(encoded_variables, variable_mask)
 
 
@@ -722,7 +713,7 @@ class Ours(BertPreTrainedModel):
         # lm_feature = self.lm_linear(torch.cat((passage_h2, question_h2, last_two_sequence_output.mean(dim=1)),dim=-1))
         # lm_logits = self._proj_lm_classifier(lm_feature)
 
-        # pooled_output = self.MeanPool(sequence_output, flat_attention_mask)   # mean pooling
+        pooled_output = self.MeanPool(sequence_output, flat_attention_mask)   # mean pooling
 
         concat_pool = self.linear(torch.cat((pooled_output, node_embed, path_embed),dim=-1))
         logits = self._opt_classifier(concat_pool)

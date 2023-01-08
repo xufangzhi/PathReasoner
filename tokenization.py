@@ -232,9 +232,12 @@ def arg_tokenizer(text_a, text_b, text_c, tokenizer, stopwords, relations:dict, 
     assert len(b_mask) == max_length, 'len_b_mask={}, max_len={}'.format(len(b_mask), max_length)
     assert len(c_mask) == max_length, 'len_c_mask={}, max_len={}'.format(len(c_mask), max_length)
 
+    if len(bpe_tokens)>max_length:
+        bpe_tokens = bpe_tokens[:max_length]
     # adapting Ġ.
     assert isinstance(bpe_tokens, list)
     bare_tokens = [token[1:] if "Ġ" in token else token for token in bpe_tokens]
+   
     argument_words, argument_space_ids = _find_arg_ngrams(bare_tokens, max_gram=max_gram)
     domain_words_stemmed, domain_words_orin, domain_space_ids = _find_dom_ngrams_2(bare_tokens, max_gram=max_gram)
     punct_space_ids = _find_punct(bare_tokens, punctuations)
@@ -675,12 +678,16 @@ def logic_tokenizer(text_a, text_b, text_c, tokenizer, stopwords, relations:dict
     assert len(a_mask) == max_length, 'len_a_mask={}, max_len={}'.format(len(a_mask), max_length)
     assert len(b_mask) == max_length, 'len_b_mask={}, max_len={}'.format(len(b_mask), max_length)
     assert len(c_mask) == max_length, 'len_c_mask={}, max_len={}'.format(len(c_mask), max_length)
-
-
+    
+    if len(bpe_tokens)>max_length:
+        bpe_tokens = bpe_tokens[:max_length]
+    if bpe_tokens[-1] != tokenizer.eos_token:
+        bpe_tokens[-1] = tokenizer.eos_token
     # adapting Ġ.
     assert isinstance(bpe_tokens, list)
     bare_tokens = [token[1:].lower() if "Ġ" in token else token.lower() for token in bpe_tokens]
     # print(len(bare_tokens))
+
 
     """ get the atom forms for each instance """
     argument_words, argument_space_ids = _find_arg_ngrams(bare_tokens, max_gram=5, relations=relations)
@@ -793,7 +800,7 @@ def logic_tokenizer(text_a, text_b, text_c, tokenizer, stopwords, relations:dict
                                                     len_inverse={}'.format(len(tags), len(predicate_list), len(negation_tags), len(inverse_tags))
 
     ''' output items '''
-    max_tag_length = 35
+    max_tag_length = 100
     max_split_length = 50
     input_ids = tokenizer.convert_tokens_to_ids(bpe_tokens)
     input_mask = [1] * len(input_ids)
@@ -805,7 +812,9 @@ def logic_tokenizer(text_a, text_b, text_c, tokenizer, stopwords, relations:dict
     pred_tag_padding_ids = [-1] * (max_tag_length - len(tags))
     tag_padding_ids = [[-1,-1]] * (max_tag_length - len(tags))
 
+    no_contain = 0
     if split_bpe_ids != sorted(split_bpe_ids, reverse=False):
+        no_contain = 1
         print("==========")
         print(split_bpe_ids)
         print(bare_tokens)
@@ -869,7 +878,7 @@ def logic_tokenizer(text_a, text_b, text_c, tokenizer, stopwords, relations:dict
     output["a_mask"] = a_mask
     output["b_mask"] = b_mask
     output["c_mask"] = c_mask
-    return output
+    return output, no_contain
 
 
 def main(text, option, question, logic, punctuations):
