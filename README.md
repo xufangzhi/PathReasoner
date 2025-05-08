@@ -13,14 +13,14 @@ Repo for "<a href="https://arxiv.org/abs/2405.19109" target="_blank">PathReasone
 </p>
 
 ## 🔥 News
-
+- [2025/05/08] 🔥🔥🔥 We release the code for equivalent path extension module ! Please check it !
 - [2025/02/16] 🔥🔥🔥 PathReasoner is accepeted by ACL 2024 (Main Conference) !
 
 ## 🚀 Quick Start
 
 The model structure is defined in the class of ``PathReasoner`` in the file of ``pathreasoner.py``
 
-The code of equivalent path extension is coming soon !
+The code of equivalent path extension is ``equaivalent_path_extension.ipynb`` !
 
 
 ## Citation
